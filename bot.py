@@ -3,7 +3,7 @@ import requests
 import pandas as pd
 import numpy as np
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, ConversationHandler, MessageHandler, Filters, CallbackContext
+from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, ConversationHandler, MessageHandler, CallbackContext, filters
 from apscheduler.schedulers.background import BackgroundScheduler
 
 # -------------------- ENV VARIABLES --------------------
@@ -182,7 +182,7 @@ def main():
 
     conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(access_button, pattern="^access$")],
-        states={ASK_CODE: [MessageHandler(Filters.text & ~Filters.command, ask_code)]},
+        states={ASK_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_code)},
         fallbacks=[]
     )
 
