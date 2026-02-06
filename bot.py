@@ -1,164 +1,130 @@
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, MessageHandler, Filters, CallbackContext
-import pandas as pd
-import requests
-import ta
 import os
+import requests
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, CallbackContext, ConversationHandler
+from apscheduler.schedulers.background import BackgroundScheduler
+import time
 
-# ===== CONFIG =====
-TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME")  # e.g., @cruxifeed
-ACCESS_CODES = os.environ.get("ACCESS_CODES", "").split(",")  # e.g., 123456,654321
-ALPHA_KEY = os.environ.get("ALPHA_VANTAGE_KEY")
+# Load environment variables
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME")
+ACCESS_CODES = os.getenv("ACCESS_CODES", "").split(",")
+ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_KEY")
 
-# ===== USER DATA =====
-user_data_store = {}
-user_access = {}
+# State for ConversationHandler
+ASK_CODE = 1
 
-# ===== START COMMAND =====
+# Users who already accessed the bot
+authorized_users = set()
+
+# List of symbols to track
+SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "USDCAD"]
+
+# Scheduler for auto notifications
+scheduler = BackgroundScheduler()
+
+# --- Helper functions ---
+def check_access_code(user_code: str):
+    return user_code in ACCESS_CODES
+
+def fetch_forex(symbol: str):
+    # Using Alpha Vantage free API
+    url = f"https://www.alphavantage.co/query?function=FX_INTRADAY&from_symbol={symbol[:3]}&to_symbol={symbol[3:]}&interval=5min&apikey={ALPHA_VANTAGE_KEY}"
+    try:
+        r = requests.get(url).json()
+        data = r.get("Time Series FX (5min)", {})
+        if not data:
+            return None
+        latest_time = list(data.keys())[0]
+        latest_price = float(data[latest_time]["1. open"])
+        return latest_price
+    except:
+        return None
+
+def calculate_signal(symbol: str):
+    # Dummy logic for demo: you can replace with RSI, MACD, MA strategy
+    price = fetch_forex(symbol)
+    if price is None:
+        return None
+    # Simple example: price > some threshold → BUY, else SELL
+    # Replace this with real strategy later
+    if price % 2 > 1:  # dummy condition
+        return "BUY"
+    else:
+        return "SELL"
+
+# --- Command handlers ---
 def start(update: Update, context: CallbackContext):
-    user_id = update.effective_user.id
-    if user_access.get(user_id, False):
-        send_main_menu(update)
-    else:
-        update.message.reply_text(
-            f"Hi! You do not have access to signals.\n\n"
-            f"Please contact {ADMIN_USERNAME} to get your access code."
-        )
+    keyboard = [[InlineKeyboardButton("Access Bot", callback_data="access")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    update.message.reply_text("Welcome! Press below to access the bot.", reply_markup=reply_markup)
 
-# ===== MAIN MENU =====
-def send_main_menu(update_or_query):
-    keyboard = [
-        [InlineKeyboardButton("📊 Choose Pair", callback_data='pair')],
-        [InlineKeyboardButton("🚀 Get Signal", callback_data='signal')]
-    ]
-    if hasattr(update_or_query, 'message'):
-        update_or_query.message.reply_text("Main Menu:", reply_markup=InlineKeyboardMarkup(keyboard))
-    else:
-        update_or_query.edit_message_text("Main Menu:", reply_markup=InlineKeyboardMarkup(keyboard))
-
-# ===== BUTTON HANDLER =====
-def button(update: Update, context: CallbackContext):
+def access_button(update: Update, context: CallbackContext):
     query = update.callback_query
     query.answer()
-    user_id = query.from_user.id
+    query.message.reply_text("Please enter your access code:")
+    return ASK_CODE
 
-    if not user_access.get(user_id, False):
-        query.edit_message_text(f"You do not have access. Contact {ADMIN_USERNAME} for a code.")
+def ask_code(update: Update, context: CallbackContext):
+    user_code = update.message.text.strip()
+    user_id = update.message.from_user.id
+
+    if check_access_code(user_code):
+        authorized_users.add(user_id)
+        update.message.reply_text("✅ Access granted! You can now use /signal to get forex signals.")
+    else:
+        update.message.reply_text(f"❌ Invalid code! Contact {ADMIN_USERNAME} to get a valid code.")
+    return ConversationHandler.END
+
+def signal_command(update: Update, context: CallbackContext):
+    user_id = update.message.from_user.id
+    if user_id not in authorized_users:
+        update.message.reply_text(f"❌ You need access first. Contact {ADMIN_USERNAME}")
         return
 
-    if query.data == 'pair':
-        keyboard = [
-            [InlineKeyboardButton("EUR/USD", callback_data='EURUSD')],
-            [InlineKeyboardButton("GBP/USD", callback_data='GBPUSD')],
-            [InlineKeyboardButton("USD/JPY", callback_data='USDJPY')],
-            [InlineKeyboardButton("USD/CAD", callback_data='USDCAD')]
-        ]
-        query.edit_message_text("Select Currency Pair:", reply_markup=InlineKeyboardMarkup(keyboard))
-    elif query.data in ['EURUSD','GBPUSD','USDJPY','USDCAD']:
-        user_data_store[user_id] = {'pair': query.data}
-        send_timeframe_menu(query)
-    elif query.data.startswith('tf_'):
-        tf = query.data.split('_')[1]
-        user_data_store[user_id]['timeframe'] = tf
-        send_expiration_menu(query)
-    elif query.data.startswith('exp_'):
-        exp = query.data.split('_')[1]
-        user_data_store[user_id]['expiration'] = exp
-        query.edit_message_text("✅ Setup complete! Press Get Signal 🚀")
-    elif query.data == 'signal':
-        send_signal(query, user_id)
+    message = "📊 Current Forex Signals:\n"
+    for sym in SYMBOLS:
+        sig = calculate_signal(sym)
+        if sig:
+            message += f"{sym}: {sig}\n"
+    update.message.reply_text(message)
 
-# ===== TIMEFRAME MENU =====
-def send_timeframe_menu(query):
-    keyboard = [
-        [InlineKeyboardButton("1m", callback_data='tf_1m'),
-         InlineKeyboardButton("5m", callback_data='tf_5m')],
-        [InlineKeyboardButton("15m", callback_data='tf_15m'),
-         InlineKeyboardButton("30m", callback_data='tf_30m')]
-    ]
-    query.edit_message_text("Select Timeframe:", reply_markup=InlineKeyboardMarkup(keyboard))
+# --- Auto notification function ---
+def auto_signal():
+    for user_id in authorized_users:
+        for sym in SYMBOLS:
+            sig = calculate_signal(sym)
+            if sig == "BUY" or sig == "SELL":
+                try:
+                    context.bot.send_message(chat_id=user_id, text=f"⏰ ALERT: {sym} signal available in 1 minute: {sig}")
+                except Exception as e:
+                    print("Failed to send auto signal:", e)
 
-# ===== EXPIRATION MENU =====
-def send_expiration_menu(query):
-    keyboard = [
-        [InlineKeyboardButton("1 min", callback_data='exp_1'),
-         InlineKeyboardButton("5 min", callback_data='exp_5')],
-        [InlineKeyboardButton("15 min", callback_data='exp_15')]
-    ]
-    query.edit_message_text("Select Expiration Time:", reply_markup=InlineKeyboardMarkup(keyboard))
+# --- Main ---
+def main():
+    updater = Updater(BOT_TOKEN, use_context=True)
+    dp = updater.dispatcher
 
-# ===== MARKET DATA =====
-def get_market_data(pair, interval="5min"):
-    from_symbol = pair[:3]
-    to_symbol = pair[3:]
-    url = f"https://www.alphavantage.co/query?function=FX_INTRADAY&from_symbol={from_symbol}&to_symbol={to_symbol}&interval={interval}&outputsize=compact&apikey={ALPHA_KEY}"
-    r = requests.get(url).json()
-    try:
-        data = r['Time Series FX (' + interval + ')']
-    except:
-        import numpy as np
-        close_prices = pd.Series([1.1,1.11,1.12,1.13,1.12,1.11,1.13,1.14,1.15,1.14])
-        df = pd.DataFrame({'close': close_prices})
-        return df
-    df = pd.DataFrame(columns=['close'])
-    for key in sorted(data.keys()):
-        df = pd.concat([df, pd.DataFrame({'close':[float(data[key]['4. close'])]})], ignore_index=True)
-    return df
+    # Conversation handler for access code
+    conv_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(access_button, pattern="^access$")],
+        states={
+            ASK_CODE: [CommandHandler("cancel", lambda u,c: ConversationHandler.END),
+                       MessageHandler(None, ask_code)]
+        },
+        fallbacks=[CommandHandler("cancel", lambda u,c: ConversationHandler.END)]
+    )
 
-# ===== SIGNAL CALCULATION =====
-def calculate_signal(pair, interval="5min"):
-    df = get_market_data(pair, interval)
-    df['rsi'] = ta.momentum.RSIIndicator(df['close'], window=5).rsi()
-    df['ma'] = ta.trend.SMAIndicator(df['close'], window=5).sma_indicator()
-    df['macd'] = ta.trend.MACD(df['close']).macd_diff()
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(conv_handler)
+    dp.add_handler(CommandHandler("signal", signal_command))
 
-    last_rsi = df['rsi'].iloc[-1]
-    last_ma = df['ma'].iloc[-1]
-    last_macd = df['macd'].iloc[-1]
-    last_price = df['close'].iloc[-1]
+    # Start the scheduler for auto signals every 1 minute
+    scheduler.add_job(lambda: auto_signal(), 'interval', minutes=1)
+    scheduler.start()
 
-    if last_rsi < 30 and last_macd > 0 and last_price > last_ma:
-        return "BUY 📈"
-    elif last_rsi > 70 and last_macd < 0 and last_price < last_ma:
-        return "SELL 📉"
-    else:
-        return "WAIT ⏳"
+    updater.start_polling()
+    updater.idle()
 
-# ===== SEND SIGNAL =====
-def send_signal(query, user_id):
-    if user_id not in user_data_store:
-        query.edit_message_text("⚠ Please select a pair first.")
-        return
-    data = user_data_store[user_id]
-    pair = data['pair']
-    tf = data['timeframe']
-    exp = data['expiration']
-    signal = calculate_signal(pair, interval=tf)
-    message = f"""
-📊 Pair: {pair}
-⏱ Timeframe: {tf}
-⌛ Expiration: {exp} min
-🚀 Signal: {signal}
-"""
-    query.edit_message_text(message)
-
-# ===== ACCESS CODE HANDLER =====
-def handle_code(update: Update, context: CallbackContext):
-    user_id = update.effective_user.id
-    text = update.message.text.strip()
-    if text in ACCESS_CODES:
-        user_access[user_id] = True
-        update.message.reply_text("✅ Access granted! Use /start to see the menu.")
-    else:
-        update.message.reply_text(f"❌ Invalid code. Contact {ADMIN_USERNAME} to get a valid code.")
-
-# ===== RUN BOT =====
-updater = Updater(TOKEN)
-dp = updater.dispatcher
-dp.add_handler(CommandHandler("start", start))
-dp.add_handler(CallbackQueryHandler(button))
-dp.add_handler(MessageHandler(Filters.text & (~Filters.command), handle_code))
-
-updater.start_polling()
-updater.idle()
+if __name__ == "__main__":
+    main()
